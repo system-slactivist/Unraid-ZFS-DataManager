@@ -1,5 +1,5 @@
 #!/bin/bash
-set -x  # Uncomment for debugging (enables trace mode for debugging each command execution)
+#set -x  # Uncomment for debugging (enables trace mode for debugging each command execution)
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # #   Script for snapshotting and/or replication of a ZFS dataset locally or remotely using ZFS                                             # #
@@ -22,16 +22,21 @@ notification_type="error"  # "all" for both success & failure, "error" for only 
 # ZFS Dataset Configuration
 # Define the ZFS datasets (and their pools) that you want to process.
 ####################
-source_datasets=("cache/ctest") # Add all the pools/datasets you want to process here e.g. ("pool1/dataset1" "pool1/dataset2" "pool2/dataset3")
+source_datasets=("cache/appdata" "vault/vms") # Add all the pools/datasets you want to process here e.g. ("pool1/dataset1" "pool1/dataset2" "pool2/dataset3")
 
 ####################
 # ZFS Snapshot Settings
+# Enable having automatic snapshot capture and cleanup.
 # Set the retention policy for ZFS snapshots.
 ####################
-snapshot_hours="1"  # Number of hourly snapshots to keep (0 = none)
-snapshot_days="0"   # Number of daily snapshots to keep (0 = none)
-snapshot_weeks="0"  # Number of weekly snapshots to keep (0 = none)
-snapshot_months="0" # Number of monthly snapshots to keep (0 = none)
+auto_snapshots="yes" # Set to "yes" to automatically take snapshots when the script is ran or "no" to skip. 
+autoprune_snapshots="yes" # Set to "yes" to automatically remove snapshots beyond the retention policy set to "no" to disable retention and keep snapshots forever.
+
+# Retention policy:
+snapshot_hours="0"  # Number of hourly snapshots to keep (0 = none)
+snapshot_days="7"   # Number of daily snapshots to keep (0 = none)
+snapshot_weeks="4"  # Number of weekly snapshots to keep (0 = none)
+snapshot_months="3" # Number of monthly snapshots to keep (0 = none)
 snapshot_years="0"  # Number of yearly snapshots to keep (0 = none)
 
 ####################
@@ -46,12 +51,12 @@ remote_server="10.10.20.197" # Remote server's name or IP address
 # Replication Settings
 # Requires having a second ZFS pool that is either local or remote
 ####################
-replication="yes"  # Choose between "yes" for ZFS replication or "no" for just using snapshots.
+replication="no"  # Choose between "yes" for ZFS replication or "no" for just using snapshots.
 
 ####################
 # Replication Variables
 ####################
-destination_dataset="vault/replication" # Parent dataset under which the replicated data will reside
+destination_dataset="pool/replication" # Parent dataset under which the replicated data will reside (e.g. "pool/dataset")
 
 # Syncoid replication mode:
 # "strict-mirror" - Mirrors the source dataset strictly, deleting snapshots in the destination that are not in the source.
@@ -62,7 +67,7 @@ syncoid_mode="strict-mirror"
 # Advanced Variables
 # These settings are typically set correctly by default and do not need to be changed.
 ####################
-sanoid_config_dir="/mnt/user/system/sanoid_test/"  # Location of the Sanoid configuration directory
+sanoid_config_dir="/mnt/user/system/sanoid/"  # Location of the Sanoid configuration directory
 
 ####################
 # Function: unraid_notify
@@ -119,6 +124,30 @@ global_pre_run_checks() {
     # Validate the replication setting
     if [ "$replication" != "yes" ] && [ "$replication" != "no" ]; then
         msg="Invalid replication method: ${replication}. Set to 'yes', or 'no'."
+        echo "$msg"
+        unraid_notify "$msg" "failure"
+        exit 1
+    fi
+
+    # Validate the autosnap setting
+    if [ "$auto_snapshots" != "yes" ] && [ "$auto_snapshots" != "no" ]; then
+        msg="The 'auto_snapshots' variable is not set to a valid value. Please set it to either 'yes' or 'no'."
+        echo "$msg"
+        unraid_notify "$msg" "failure"
+        exit 1
+    fi
+
+    # Validate the autoprune setting
+    if [ "$autoprune_snapshots" != "yes" ] && [ "$autoprune_snapshots" != "no" ]; then
+        msg="The 'autoprune_snapshots' variable is not set to a valid value. Please set it to either 'yes' or 'no'."
+        echo "$msg"
+        unraid_notify "$msg" "failure"
+        exit 1
+    fi
+
+    # Verify the script is set to complete work
+    if [ "$replication" != "yes" ] && [ "$auto_snapshots" = "no" ]; then
+        msg='Both replication and autosnap are disabled. The script has been run with nothing to do.'
         echo "$msg"
         unraid_notify "$msg" "failure"
         exit 1
@@ -189,7 +218,6 @@ dataset_pre_run_checks() {
 ####################
 # Function: create_sanoid_config
 # Generates a Sanoid configuration file for the dataset based on the snapshot retention policy.
-# This function runs only if autosnapshots are enabled.
 ####################
 create_sanoid_config() {
     # Ensure the Sanoid config directory exists
@@ -213,8 +241,8 @@ daily = ${snapshot_days}
 weekly = ${snapshot_weeks}
 monthly = ${snapshot_months}
 yearly = ${snapshot_years}
-autosnap = yes
-autoprune = yes"
+autosnap = ${auto_snapshots}
+autoprune = ${autoprune_snapshots}"
 
     # Update the Sanoid configuration file if there are changes
     if [ -f "${sanoid_config_complete_path}sanoid.conf" ]; then
@@ -236,8 +264,10 @@ autoprune = yes"
 # Creates automatic snapshots of the source dataset using Sanoid based on the retention policy.
 ####################
 autosnap() {
-    echo "Creating automatic snapshots for ${source_dataset} using Sanoid."
-    if /usr/local/sbin/sanoid --configdir="${sanoid_config_complete_path}" --take-snapshots;then
+    echo "Creating automatic snapshots for ${source_dataset} and its children using Sanoid."
+
+    # Run Sanoid in verbose mode and capture all output
+    if /usr/local/sbin/sanoid --configdir="${sanoid_config_complete_path}" --take-snapshots; then
             unraid_notify "Snapshot creation successful for ${source_dataset}." "success"
     else
         msg="Snapshot creation failed for ${source_dataset}."
@@ -247,29 +277,19 @@ autosnap() {
     fi
 }
 
+
 ####################
 # Function: autoprune
 # Prunes old snapshots of the source dataset using Sanoid based on the retention policy.
 ####################
 autoprune() {
-    echo "Pruning snapshots for ${source_dataset} using Sanoid."
+    echo "Pruning snapshots for ${source_dataset} and its children using Sanoid."
     
-    # Capture the list of snapshots before pruning
-    snapshots_before_prune=$(zfs list -t snapshot -o name -s creation -H -r "${source_dataset}")
-    
+    # Run Sanoid in verbose mode and capture all output
     if /usr/local/sbin/sanoid --configdir="${sanoid_config_complete_path}" --prune-snapshots; then
-        # Capture the list of snapshots after pruning
-        snapshots_after_prune=$(zfs list -t snapshot -o name -s creation -H -r "${source_dataset}")
-        
-        if [[ "$snapshots_before_prune" == "$snapshots_after_prune" ]]; then
-            msg="Snapshot pruning ran, but no snapshots were removed for ${source_dataset}. This may occur if all snapshots are within retention policy."
-            echo "$msg"
-            unraid_notify "$msg" "success"
-        else
-            unraid_notify "Snapshot removal successful for ${source_dataset}." "success"
-        fi
+        unraid_notify "Snapshot removal successful for ${source_dataset} and its children." "success"
     else
-        msg="Snapshot removal failed for ${source_dataset}."
+        msg="Snapshot removal failed for ${source_dataset} and its children."
         echo "$msg"
         unraid_notify "$msg" "failure"
         exit 1
@@ -281,7 +301,6 @@ autoprune() {
 # Uses ZFS to replicate the source dataset to the destination.
 ####################
 zfs_replication() {
-    if [ "$replication" = "yes" ]; then
         zfs_destination_path="${destination_dataset}/${source_dataset//\//_}"
 
         # Determine if replication is to a remote or local destination
@@ -335,9 +354,6 @@ zfs_replication() {
             unraid_notify "ZFS replication failed from source: ${source_dataset} to ${destination}" "failure"
             return 1
         fi
-    else
-        echo "ZFS replication not set. Skipping ZFS replication."
-    fi
 }
 
 ####################
@@ -356,9 +372,14 @@ cleanup_unwanted_sanoid_configs() {
         # Extract the datasets from the previous run
         mapfile -t previous_datasets < <(grep "^datasets:" "$sanoid_state_file" | sed 's/datasets: //' | tr ' ' '\n')
 
-        echo "Previous datasets: ${previous_datasets[*]}"
+        if [ ${#previous_datasets[@]} -eq 0 ]; then
+            echo "No previous datasets found in the state file."
+        else
+            echo "Previous datasets: ${previous_datasets[*]}"
+        fi
     else
-        echo "No previous state found, creating new state file."
+        echo "No previous state file found, creating a new state file after cleanup."
+        previous_datasets=()
     fi
 
     echo "Checking for unwanted Sanoid configs."
@@ -371,11 +392,11 @@ cleanup_unwanted_sanoid_configs() {
 
             if [ -d "$sanoid_config_complete_path" ]; then
                 echo "Deleting Sanoid config directory: $sanoid_config_complete_path"
-                if ! rm -rf "$sanoid_config_complete_path"; then
-                    echo "Failed to delete: $sanoid_config_complete_path"
-                else
+                if rm -rf "$sanoid_config_complete_path"; then
                     echo "Successfully deleted: $sanoid_config_complete_path"
                     found_unwanted=true
+                else
+                    echo "Failed to delete: $sanoid_config_complete_path"
                 fi
             fi
         fi
@@ -386,7 +407,7 @@ cleanup_unwanted_sanoid_configs() {
     fi
 
     echo "Saving current state to ${sanoid_state_file}."
-    echo "Datasets: ${source_datasets[*]}" > "$sanoid_state_file"
+    echo "datasets: ${source_datasets[*]}" > "$sanoid_state_file"
 
     echo "Cleanup of unwanted Sanoid configs completed."
 }
@@ -405,33 +426,35 @@ run_for_each_dataset() {
     # Iterate over each defined dataset
     for dataset in "${source_datasets[@]}"; do
         source_dataset="$dataset"
-        source_path="/mnt/${dataset}"
         sanoid_config_complete_path="${sanoid_config_dir}${dataset//\//_}/"
 
         echo "Processing dataset: ${dataset}"
-        echo "source_dataset=${source_dataset}"
-        echo "source_path=${source_path}"
 
-        # Create Sanoid configuration for each dataset
-        echo "Creating sanoid config for ${dataset}"
-        create_sanoid_config
+        # Only run autosnap and related functions if enabled
+        if [ "$auto_snapshots" = "yes" ]; then
+            # Create Sanoid configuration for each dataset
+            echo "Creating sanoid config for ${dataset}"
+            create_sanoid_config
 
-        # Perform dataset-specific pre-run checks
-        echo "Performing dataset-specific pre-run checks for ${dataset}"
-        dataset_pre_run_checks
+            # Take snapshots for each dataset
+            echo "Taking snapshots for ${dataset}"
+            autosnap
 
-        # Take snapshots and prune old snapshots for each dataset
-        echo "Taking snapshots for ${dataset}"
-        autosnap
-        echo "Pruning old snapshots for ${dataset}"
-        autoprune
+            # Prune old snapshots for each dataset (if pruning is enabled)
+            if [ "$autoprune_snapshots" = "yes" ]; then
+                echo "Pruning old snapshots for ${dataset}"
+                autoprune
+            fi
+        fi
     done
 
-    # Clean up unwanted Sanoid configurations 
-    cleanup_unwanted_sanoid_configs
+    # Clean up unwanted Sanoid configurations (if autosnap is enabled)
+    if [ "$auto_snapshots" = "yes" ]; then
+        cleanup_unwanted_sanoid_configs
+    fi
 
     # Perform ZFS replication (if enabled) after all datasets have been processed
-    if [[ "${replication}" == "yes" ]]; then
+    if [ "$replication" = "yes" ]; then
         echo "Performing ZFS replication"
         for dataset in "${source_datasets[@]}"; do
             source_dataset="$dataset"
