@@ -203,7 +203,7 @@ create_sanoid_config() {
     fi
 
     # Build the new Sanoid configuration content
-    new_content="[${source_pool}/${source_dataset_name}]
+    new_content="[${source_dataset}]
 use_template = production
 recursive = yes
 
@@ -345,7 +345,7 @@ zfs_replication() {
 # Removes Sanoid configuration files for datasets that have been removed.
 ####################
 cleanup_unwanted_sanoid_configs() {
-    local sanoid_state_file="${sanoid_config_dir}/sanoid_state.txt"
+    local sanoid_state_file="${sanoid_config_dir}sanoid_state.txt"
     local found_unwanted=false
 
     echo "Starting cleanup of unwanted Sanoid configs."
@@ -386,7 +386,7 @@ cleanup_unwanted_sanoid_configs() {
     fi
 
     echo "Saving current state to ${sanoid_state_file}."
-    echo "datasets: ${source_datasets[*]}" > "$sanoid_state_file"
+    echo "Datasets: ${source_datasets[*]}" > "$sanoid_state_file"
 
     echo "Cleanup of unwanted Sanoid configs completed."
 }
@@ -404,15 +404,11 @@ run_for_each_dataset() {
 
     # Iterate over each defined dataset
     for dataset in "${source_datasets[@]}"; do
-        source_pool=$(echo "$dataset" | cut -d'/' -f1)
-        source_dataset_name=$(echo "$dataset" | cut -d'/' -f2-)
         source_dataset="$dataset"
         source_path="/mnt/${dataset}"
         sanoid_config_complete_path="${sanoid_config_dir}${dataset//\//_}/"
 
         echo "Processing dataset: ${dataset}"
-        echo "source_pool=${source_pool}"
-        echo "source_dataset_name=${source_dataset_name}"
         echo "source_dataset=${source_dataset}"
         echo "source_path=${source_path}"
 
@@ -438,8 +434,7 @@ run_for_each_dataset() {
     if [[ "${replication}" == "yes" ]]; then
         echo "Performing ZFS replication"
         for dataset in "${source_datasets[@]}"; do
-            source_pool=$(echo "$dataset" | cut -d'/' -f1)
-            source_dataset_name=$(echo "$dataset" | cut -d'/' -f2-)
+            source_dataset="$dataset"
             zfs_replication
         done
     fi
