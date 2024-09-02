@@ -288,8 +288,7 @@ zfs_replication() {
         if [ "$destination_remote" = "yes" ]; then
             destination="${remote_user}@${remote_server}:${zfs_destination_path}"
             # Check or create the full destination ZFS dataset hierarchy on the remote server
-            ssh "${remote_user}@${remote_server}" "if ! zfs list -o name -H '${zfs_destination_path}' &>/dev/null; then zfs create -p '${zfs_destination_path}'; fi"
-            if [ $? -ne 0 ]; then
+            if ! ssh "${remote_user}@${remote_server}" "if ! zfs list -o name -H '\${zfs_destination_path}' &>/dev/null; then zfs create -p '\${zfs_destination_path}'; fi"; then
                 unraid_notify "Failed to check or create ZFS dataset hierarchy on remote server: ${destination}" "failure"
                 return 1
             fi
@@ -297,8 +296,7 @@ zfs_replication() {
             destination="${zfs_destination_path}"
             # Check or create the full destination ZFS dataset hierarchy locally
             if ! zfs list -o name -H "${zfs_destination_path}" &>/dev/null; then
-                zfs create -p "${zfs_destination_path}"
-                if [ $? -ne 0 ]; then
+                if ! zfs create -p "${zfs_destination_path}"; then
                     unraid_notify "Failed to check or create local ZFS dataset hierarchy: ${zfs_destination_path}" "failure"
                     return 1
                 fi
@@ -329,10 +327,9 @@ zfs_replication() {
 
         # Perform ZFS replication using syncoid
         echo "Starting ZFS replication using syncoid with mode: ${syncoid_mode}"
-        echo "Running Command: /usr/local/sbin/syncoid ${syncoid_flags[@]} ${source_dataset} ${destination}"
-        
-        /usr/local/sbin/syncoid "${syncoid_flags[@]}" "${source_dataset}" "${destination}"
-        if [ $? -eq 0 ]; then
+        echo "Running Command: /usr/local/sbin/syncoid ${syncoid_flags[*]} ${source_dataset} ${destination}"
+
+        if /usr/local/sbin/syncoid "${syncoid_flags[@]}" "${source_dataset}" "${destination}"; then
             unraid_notify "ZFS replication was successful from source: ${source_dataset} to destination: ${destination}" "success"
         else
             unraid_notify "ZFS replication failed from source: ${source_dataset} to ${destination}" "failure"
