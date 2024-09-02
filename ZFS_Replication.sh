@@ -346,7 +346,6 @@ zfs_replication() {
 ####################
 cleanup_unwanted_sanoid_configs() {
     local sanoid_state_file="${sanoid_config_dir}/sanoid_state.txt"
-    local previous_datasets=()
     local found_unwanted=false
 
     echo "Starting cleanup of unwanted Sanoid configs."
@@ -355,42 +354,39 @@ cleanup_unwanted_sanoid_configs() {
         echo "Loading previous state from ${sanoid_state_file}."
 
         # Extract the datasets from the previous run
-        previous_datasets=($(grep "^datasets:" "$sanoid_state_file" | sed 's/datasets: //' | tr ' ' '\n'))
+        mapfile -t previous_datasets < <(grep "^datasets:" "$sanoid_state_file" | sed 's/datasets: //' | tr ' ' '\n')
 
-        echo "Previous datasets: ${previous_datasets[@]}"
+        echo "Previous datasets: ${previous_datasets[*]}"
     else
         echo "No previous state found, creating new state file."
-        previous_datasets=()
     fi
 
     echo "Checking for unwanted Sanoid configs."
     for dataset in "${previous_datasets[@]}"; do
-        local dataset_trimmed=$(echo "$dataset" | xargs)  # Trim spaces around dataset name
-        if [[ ! " ${source_datasets[@]} " =~ " ${dataset_trimmed} " ]]; then
+        local dataset_trimmed
+        dataset_trimmed=$(echo "$dataset" | xargs)  # Trim spaces around dataset name
+        if [[ ! " ${source_datasets[*]} " =~ ${dataset_trimmed} ]]; then
             echo "Dataset $dataset_trimmed is no longer in the source list, removing its Sanoid config..."
             sanoid_config_complete_path="${sanoid_config_dir}${dataset_trimmed//\//_}/"
 
             if [ -d "$sanoid_config_complete_path" ]; then
                 echo "Deleting Sanoid config directory: $sanoid_config_complete_path"
-                rm -rf "$sanoid_config_complete_path"
-
-                # Verify if the directory was deleted
-                if [[ ! -d "$sanoid_config_complete_path" ]]; then
+                if ! rm -rf "$sanoid_config_complete_path"; then
+                    echo "Failed to delete: $sanoid_config_complete_path"
+                else
                     echo "Successfully deleted: $sanoid_config_complete_path"
                     found_unwanted=true
-                else
-                    echo "Failed to delete: $sanoid_config_complete_path"
                 fi
             fi
         fi
     done
 
-    if [ "$found_unwanted" = false ]; then
+    if ! $found_unwanted; then
         echo "No unwanted Sanoid configs found."
     fi
 
     echo "Saving current state to ${sanoid_state_file}."
-    echo "datasets: ${source_datasets[@]}" > "$sanoid_state_file"
+    echo "datasets: ${source_datasets[*]}" > "$sanoid_state_file"
 
     echo "Cleanup of unwanted Sanoid configs completed."
 }
