@@ -1,4 +1,4 @@
-# ZFS Snapshot Replication Script for Unraid
+# Unraid ZFS DataManager
 
 This script automates the process of creating snapshots and replicating ZFS datasets on Unraid, making backups and data recovery easier and more reliable. It’s designed for Unraid version 6.12 and above, providing flexible options for both local and remote backups using either ZFS replication.
 
