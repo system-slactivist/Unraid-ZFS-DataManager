@@ -22,7 +22,7 @@ notification_type="error"  # "all" for both success & failure, "error" for only 
 # ZFS Dataset Configuration
 # Define the ZFS datasets (and their pools) that you want to process.
 ####################
-source_datasets=("cache/appdata" "vault/vms") # Add all the pools/datasets you want to process here e.g. ("pool1/dataset1" "pool1/dataset2" "pool2/dataset3")
+source_datasets=("cache/appdata" "cache/downloads" "grid/vms") # Add all the pools/datasets you want to process here e.g. ("pool1/dataset1" "pool1/dataset2" "pool2/dataset3")
 
 ####################
 # ZFS Snapshot Settings
@@ -56,7 +56,7 @@ replication="no"  # Choose between "yes" for ZFS replication or "no" for just us
 ####################
 # Replication Variables
 ####################
-destination_dataset="pool/replication" # Parent dataset under which the replicated data will reside (e.g. "pool/dataset")
+destination_dataset="vault/replication" # Parent dataset under which the replicated data will reside (e.g. "pool/dataset")
 
 # Syncoid replication mode:
 # "strict-mirror" - Mirrors the source dataset strictly, deleting snapshots in the destination that are not in the source.
