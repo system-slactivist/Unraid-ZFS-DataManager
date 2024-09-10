@@ -118,7 +118,7 @@ restore_snapshot() {
     # Verify that the destination dataset exists and has snapshots
     if ! zfs list -H "${destination}" &>/dev/null; then
         unraid_notify "Destination ${destination} does not exist. Cannot restore ${source_dataset}." "failure"
-        log_message "ERROR: Destination ${destination} does not exist. Cannot restore ${source_dataset}."
+        echo "ERROR: Destination ${destination} does not exist. Cannot restore ${source_dataset}."
         return 1
     fi
 
@@ -132,11 +132,11 @@ restore_snapshot() {
     echo "Restoring ${source_dataset} from snapshot ${latest_snapshot}."
     if ! run_restore zfs send "${latest_snapshot}" | run_restore zfs receive -F "${source_dataset}"; then
         unraid_notify "Restoration failed for ${source_dataset}." "failure"
-        log_message "ERROR: Restoration failed for ${source_dataset} from snapshot ${latest_snapshot}."
+        echo "ERROR: Restoration failed for ${source_dataset} from snapshot ${latest_snapshot}."
         return 1
     else
         unraid_notify "Restoration successful for ${source_dataset} from snapshot ${latest_snapshot}." "success"
-        log_message "SUCCESS: Restoration successful for ${source_dataset} from snapshot ${latest_snapshot}."
+        echo "SUCCESS: Restoration successful for ${source_dataset} from snapshot ${latest_snapshot}."
     fi
 }
 
@@ -177,12 +177,12 @@ run_for_each_dataset() {
                 child_latest_snapshot=$(zfs list -t snapshot -o name -s creation -H "${child}" | tail -n 1)
                 if ! run_restore zfs send "${child_latest_snapshot}" | run_restore zfs receive -F "${child_source_dataset}"; then
                     unraid_notify "Restoration failed for child dataset ${child_source_dataset}." "failure"
-                    log_message "ERROR: Restoration failed for child dataset ${child_source_dataset}."
+                    echo "ERROR: Restoration failed for child dataset ${child_source_dataset}."
                     final_status="failure"
                     final_message="One or more datasets failed to restore."
                 else
                     unraid_notify "Restoration successful for child dataset ${child_source_dataset}." "success"
-                    log_message "SUCCESS: Restoration successful for child dataset ${child_source_dataset}."
+                    echo "SUCCESS: Restoration successful for child dataset ${child_source_dataset}."
                 fi
             done
         fi
@@ -191,10 +191,10 @@ run_for_each_dataset() {
     # Send final summary notification
     if [ "$final_status" = "success" ]; then
         unraid_notify "$final_message" "success"
-        log_message "SUMMARY: $final_message"
+        echo "SUMMARY: $final_message"
     else
         unraid_notify "$final_message" "failure"
-        log_message "SUMMARY: $final_message"
+        echo "SUMMARY: $final_message"
     fi
 }
 
