@@ -5,11 +5,11 @@
 # #   Script for snapshotting and/or replication of a ZFS dataset locally or remotely using ZFS                                             # #
 # #   (Requires Unraid 6.12 or above)                                                                                                       # #
 # #   Original by SpaceInvaderOne                                                                                                           # #
-# #   Modified by rjwaters147 using ChatGPT Data Analyzer                                                                                   # #
+# #   Modified by Slactivist                                                                                                                # #
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
 ####################
-# Main Variables 
+# Main Variables
 ####################
 
 ####################
@@ -29,7 +29,7 @@ source_datasets=("cache/appdata" "cache/downloads" "grid/vms") # Add all the poo
 # Enable having automatic snapshot capture and cleanup.
 # Set the retention policy for ZFS snapshots.
 ####################
-auto_snapshots="yes" # Set to "yes" to automatically take snapshots when the script is ran or "no" to skip. 
+auto_snapshots="yes" # Set to "yes" to automatically take snapshots when the script is ran or "no" to skip.
 autoprune_snapshots="yes" # Set to "yes" to automatically remove snapshots beyond the retention policy set to "no" to disable retention and keep snapshots forever.
 
 # Retention policy:
@@ -77,17 +77,17 @@ sanoid_config_dir="/mnt/user/system/sanoid/"  # Location of the Sanoid configura
 unraid_notify() {
     local message="$1"
     local flag="$2"
-    
+
     # Exit if notifications are disabled
     if [[ "$notification_type" == "none" ]]; then
         return 0
     fi
-    
+
     # Exit if only error notifications are enabled and the message is a success
     if [[ "$notification_type" == "error" && "$flag" == "success" ]]; then
         return 0
     fi
-    
+
     # Determine notification severity based on the message type
     local severity="normal"
     if [[ "$flag" == "success" ]]; then
@@ -95,13 +95,13 @@ unraid_notify() {
     else
         severity="warning"
     fi
-    
+
     /usr/local/emhttp/webGui/scripts/notify -s "Backup Notification" -d "$message" -i "$severity"
 }
 
 ####################
 # Function: global_pre_run_checks
-# Performs essential checks before processing any datasets. 
+# Performs essential checks before processing any datasets.
 # Ensures required tools are installed and configurations are valid.
 ####################
 global_pre_run_checks() {
@@ -112,7 +112,7 @@ global_pre_run_checks() {
         unraid_notify "$msg" "failure"
         exit 1
     fi
-    
+
     # Ensure Sanoid is installed and executable
     if [ ! -x /usr/local/sbin/sanoid ]; then
         msg="Sanoid is not found or not executable. Please install Sanoid and try again."
@@ -145,14 +145,14 @@ global_pre_run_checks() {
         exit 1
     fi
 
-    # Verify the script is set to complete work
+    # Verify the script is set to do some work
     if [ "$replication" != "yes" ] && [ "$auto_snapshots" = "no" ]; then
         msg='Both replication and autosnap are disabled. The script has been run with nothing to do.'
         echo "$msg"
         unraid_notify "$msg" "failure"
         exit 1
     fi
-    
+
     # Validate the remote destination configuration
     if [ "$destination_remote" != "yes" ] && [ "$destination_remote" != "no" ]; then
         msg="Invalid destination_remote setting. Set to 'yes' or 'no'."
@@ -160,7 +160,7 @@ global_pre_run_checks() {
         unraid_notify "$msg" "failure"
         exit 1
     fi
-    
+
     # Ensure remote_user and remote_server are set if remote backup is enabled
     if [ "$destination_remote" = "yes" ] && { [ -z "$remote_user" ] || [ -z "$remote_server" ]; }; then
         msg="Remote user and server must be set when destination_remote is 'yes'."
@@ -174,6 +174,14 @@ global_pre_run_checks() {
         echo "Checking remote server availability..."
         if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "${remote_user}@${remote_server}" echo 'SSH connection successful' &>/dev/null; then
             msg="SSH connection failed. Verify remote server details and ensure SSH keys are exchanged."
+            echo "$msg"
+            unraid_notify "$msg" "failure"
+            exit 1
+        fi
+
+        # Check if syncoid is installed on the remote server
+        if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "${remote_user}@${remote_server}" "command -v syncoid >/dev/null 2>&1"; then
+            msg="Syncoid is not found on the remote server: ${remote_server}. Please install syncoid to proceed with remote replication."
             echo "$msg"
             unraid_notify "$msg" "failure"
             exit 1
@@ -195,7 +203,7 @@ dataset_pre_run_checks() {
         unraid_notify "$msg" "failure"
         exit 1
     fi
-    
+
     # Ensure the dataset name does not contain spaces (required for autosnapshots)
     if [[ "${source_dataset}" == *" "* ]]; then
         msg="Error: The source dataset name '${source_dataset}' contains spaces. Rename the dataset and try again."
@@ -203,7 +211,7 @@ dataset_pre_run_checks() {
         unraid_notify "$msg" "failure"
         exit 1
     fi
-    
+
     # Check if the dataset contains any data
     local used
     used=$(zfs get -H -o value used "${source_dataset}")
@@ -224,10 +232,10 @@ create_sanoid_config() {
     if [ ! -d "${sanoid_config_complete_path}" ]; then
         mkdir -p "${sanoid_config_complete_path}"
     fi
-    
-    # Copy default Sanoid configuration if not already present
-    if [ ! -f "${sanoid_config_complete_path}sanoid.defaults.conf" ]; then
-        cp /etc/sanoid/sanoid.defaults.conf "${sanoid_config_complete_path}sanoid.defaults.conf"
+
+    # Symlink the global sanoid.defaults.conf if not already present
+    if [ ! -e "${sanoid_config_complete_path}sanoid.defaults.conf" ]; then
+        ln -s /etc/sanoid/sanoid.defaults.conf "${sanoid_config_complete_path}sanoid.defaults.conf"
     fi
 
     # Build the new Sanoid configuration content
@@ -284,7 +292,7 @@ autosnap() {
 ####################
 autoprune() {
     echo "Pruning snapshots for ${source_dataset} and its children using Sanoid."
-    
+
     # Run Sanoid in verbose mode and capture all output
     if /usr/local/sbin/sanoid --configdir="${sanoid_config_complete_path}" --prune-snapshots; then
         unraid_notify "Snapshot removal successful for ${source_dataset} and its children." "success"
@@ -363,6 +371,7 @@ zfs_replication() {
 cleanup_unwanted_sanoid_configs() {
     local sanoid_state_file="${sanoid_config_dir}sanoid_state.txt"
     local found_unwanted=false
+    local dataset_trimmed
 
     echo "Starting cleanup of unwanted Sanoid configs."
 
@@ -384,8 +393,9 @@ cleanup_unwanted_sanoid_configs() {
 
     echo "Checking for unwanted Sanoid configs."
     for dataset in "${previous_datasets[@]}"; do
-        local dataset_trimmed
-        dataset_trimmed=$(echo "$dataset" | xargs)  # Trim spaces around dataset name
+        # Trim spaces around the dataset name
+        dataset_trimmed=$(echo "$dataset" | xargs)
+
         if [[ ! " ${source_datasets[*]} " =~ ${dataset_trimmed} ]]; then
             echo "Dataset $dataset_trimmed is no longer in the source list, removing its Sanoid config..."
             sanoid_config_complete_path="${sanoid_config_dir}${dataset_trimmed//\//_}/"
@@ -426,6 +436,10 @@ run_for_each_dataset() {
     # Iterate over each defined dataset
     for dataset in "${source_datasets[@]}"; do
         source_dataset="$dataset"
+
+        # Call dataset_pre_run_checks to validate this dataset
+        dataset_pre_run_checks
+
         sanoid_config_complete_path="${sanoid_config_dir}${dataset//\//_}/"
 
         echo "Processing dataset: ${dataset}"
