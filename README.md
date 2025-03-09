@@ -59,4 +59,3 @@ This script is provided as-is, without warranty of any kind. Please review and t
 ## Credits
 
 - **Original Script**: [SpaceInvaderOne](https://github.com/SpaceinvaderOne/Unraid_ZFS_Dataset_Snapshot_and_Replications)
-- **Modifications**: ChatGPT Data Analyzer
