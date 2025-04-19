@@ -6,12 +6,20 @@ trap 'unraid_notify "Script terminated unexpectedly." "failure"' ERR
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # #   Script for restoring replication of a ZFS dataset locally or remotely using ZFS                                                       # #
 # #   (Requires Unraid 6.12 or above)                                                                                                       # #
-# #   By rjwaters147 using ChatGPT Data Analyzer                                                                                            # #
+# #   By SystemSlactivist                                                                                                                   # #
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
 ####################
 # Configuration
 ####################
+
+####################
+# Dry Run Mode
+####################
+# Set this to "yes" to simulate the restoration process without making any actual changes.
+# This is useful for testing and ensuring that the script is configured correctly.
+# Set this to "no" to perform the actual restoration.
+dry_run="yes"
 
 ####################
 # Dataset(s) to Restore
@@ -25,7 +33,6 @@ trap 'unraid_notify "Script terminated unexpectedly." "failure"' ERR
 # In this example, we are restoring a dataset named "appdata" from the "cache" pool.
 source_datasets=("cache/appdata")
 
-
 ####################
 # Backup to Restore From
 ####################
@@ -37,12 +44,12 @@ source_datasets=("cache/appdata")
 destination_dataset="vault/replication"
 
 ####################
-# Dry Run Mode
+# Remote Server Configuration
+# Configure settings if you plan to replicate data from a remote server.
 ####################
-# Set this to "yes" to simulate the restoration process without making any actual changes.
-# This is useful for testing and ensuring that the script is configured correctly.
-# Set this to "no" to perform the actual restoration.
-dry_run="yes"
+destination_remote="no"  # Set to "no" for local, "yes" for remote
+remote_user="root"       # Remote server user (Unraid server typically uses "root")
+remote_server="10.10.20.197" # Remote server's name or IP address
 
 ####################
 # Main Script
@@ -83,12 +90,14 @@ run_restore() {
 # Allows user to select a specific snapshot to restore.
 ####################
 select_snapshot() {
-    available_snapshots=$(zfs list -t snapshot -o name -s creation -H "${destination}")
-    echo "Available snapshots for ${source_dataset}:"
-    echo "$available_snapshots"
+    # 'dest' must be set in the caller (restore_snapshot)
+    local snaps
+    snaps=$(zfs list -t snapshot -o name -s creation -H "${dest}")
+    echo "Available snapshots for ${source_dataset} (in ${dest}):"
+    echo "$snaps"
     read -r -p "Enter the snapshot to restore (or press Enter to restore the latest): " selected_snapshot
     if [ -z "$selected_snapshot" ]; then
-        selected_snapshot=$(echo "$available_snapshots" | tail -n 1)
+        selected_snapshot=$(echo "$snaps" | tail -n1)
         echo "No snapshot selected. Defaulting to the latest snapshot: $selected_snapshot"
     fi
     echo "Selected snapshot: $selected_snapshot"
@@ -112,86 +121,117 @@ check_existing_dataset() {
 
 ####################
 # Function: restore_snapshot
-# Restores the dataset from the selected snapshot on the backup pool.
+# Restores the dataset from the selected snapshot, either locally or remotely.
 ####################
 restore_snapshot() {
-    echo "Restoring dataset ${source_dataset} from ${destination}."
+    # single base path for both local and remote
+    local dest="${destination_dataset}/${source_dataset//\//_}"
+    local remote_target="${remote_user}@${remote_server}:${dest}"
 
-    # Verify that the destination dataset exists and has snapshots
-    if ! zfs list -H "${destination}" &>/dev/null; then
-        unraid_notify "Destination ${destination} does not exist. Cannot restore ${source_dataset}." "failure"
-        echo "ERROR: Destination ${destination} does not exist. Cannot restore ${source_dataset}."
+    # verify backup exists
+    if ! zfs list -H "${dest}" &>/dev/null; then
+        unraid_notify "Backup ${dest} not found." "failure"
+        echo "ERROR: Backup ${dest} not found."
         return 1
     fi
 
-    # Select the snapshot to restore
     select_snapshot
-
-    # Check if the source dataset already exists
     check_existing_dataset
 
-    # Restore the dataset
-    echo "Restoring ${source_dataset} from snapshot ${latest_snapshot}."
-    if ! run_restore zfs send "${latest_snapshot}" | run_restore zfs receive -F "${source_dataset}"; then
-        unraid_notify "Restoration failed for ${source_dataset}." "failure"
-        echo "ERROR: Restoration failed for ${source_dataset} from snapshot ${latest_snapshot}."
-        return 1
-    else
-        unraid_notify "Restoration successful for ${source_dataset} from snapshot ${latest_snapshot}." "success"
-        echo "SUCCESS: Restoration successful for ${source_dataset} from snapshot ${latest_snapshot}."
+    # Local restore
+    if [[ "$destination_remote" == "no" ]]; then
+        if [[ "$dry_run" == "yes" ]]; then
+            echo "DRY RUN: zfs send \"${latest_snapshot}\" | zfs receive -F \"${dest}\""
+        else
+            echo "Restoring locally → ${dest}"
+            if ! run_restore zfs send "${latest_snapshot}" \
+                 | run_restore zfs receive -F "${dest}"; then
+                unraid_notify "Local restore failed: ${source_dataset}" "failure"
+                return 1
+            fi
+            unraid_notify "Local restore succeeded: ${source_dataset}" "success"
+        fi
     fi
+
+    # Remote restore
+    if [[ "$destination_remote" == "yes" ]]; then
+        if [[ "$dry_run" == "yes" ]]; then
+            echo "DRY RUN: zfs send \"${latest_snapshot}\" | ssh ${remote_target} zfs receive -F \"${dest}\""
+        else
+            echo "Restoring remotely → ${remote_target}"
+            ssh "${remote_user}@${remote_server}" "zfs create -p \"${dest}\"" 2>/dev/null || true
+            if ! run_restore zfs send "${latest_snapshot}" \
+                 | run_restore ssh "${remote_user}@${remote_server}" zfs receive -F "${dest}"; then
+                unraid_notify "Remote restore failed: ${source_dataset}" "failure"
+                return 1
+            fi
+            unraid_notify "Remote restore succeeded: ${source_dataset}" "success"
+        fi
+    fi
+
+    return 0
 }
 
 ####################
 # Function: run_for_each_dataset
-# Iterates over each defined dataset, performing restoration tasks sequentially.
-# Sends a final summary notification after processing all datasets.
+# Iterates over each defined dataset, performing restoration tasks (including children).
 ####################
 run_for_each_dataset() {
     echo "Starting the restoration process for defined datasets."
 
-    final_status="success"
-    final_message="All datasets were restored successfully."
+    local final_status="success"
+    local final_message="All datasets were restored successfully."
 
-    for dataset in "${source_datasets[@]}"; do
-        source_dataset="$dataset"
-        destination="${destination_dataset}/${source_dataset//\//_}"
+    for source_dataset in "${source_datasets[@]}"; do
+        echo "Processing dataset: ${source_dataset}"
+        echo "  backup location: ${destination_dataset}/${source_dataset//\//_}"
 
-        echo "Processing dataset: ${dataset}"
-        echo "destination=${destination}"
-
-        # Restore the dataset from the backup
         if ! restore_snapshot; then
             final_status="failure"
             final_message="One or more datasets failed to restore."
-            # Continue with the next dataset instead of exiting
         fi
 
-        # If the specified dataset is a parent, restore its child datasets
-        if zfs list -H -r -o name "${destination}" | grep -q "^${destination}/"; then
-            child_datasets=$(zfs list -H -r -o name "${destination}" | grep "^${destination}/")
-            for child in $child_datasets; do
-                # Correctly construct the child_source_dataset path
-                child_relative_path="${child#"${destination_dataset}"/}"  # Remove base destination dataset path
-                child_source_dataset="${child_relative_path//_//}"  # Rebuild correct source path
+        # if parent has children
+        local dest="${destination_dataset}/${source_dataset//\//_}"
+        if zfs list -H -r -o name "${dest}" | grep -q "^${dest}/"; then
+            local child_list
+            child_list=$(zfs list -H -r -o name "${dest}" | grep "^${dest}/")
 
-                echo "Restoring child dataset: ${child_source_dataset}"
-                child_latest_snapshot=$(zfs list -t snapshot -o name -s creation -H "${child}" | tail -n 1)
-                if ! run_restore zfs send "${child_latest_snapshot}" | run_restore zfs receive -F "${child_source_dataset}"; then
-                    unraid_notify "Restoration failed for child dataset ${child_source_dataset}." "failure"
-                    echo "ERROR: Restoration failed for child dataset ${child_source_dataset}."
-                    final_status="failure"
-                    final_message="One or more datasets failed to restore."
-                else
-                    unraid_notify "Restoration successful for child dataset ${child_source_dataset}." "success"
-                    echo "SUCCESS: Restoration successful for child dataset ${child_source_dataset}."
+            for child in $child_list; do
+                local child_relative="${child#${dest}/}"
+                local child_source="${source_dataset}/${child_relative//_//}"
+                local child_snapshot
+                child_snapshot=$(zfs list -t snapshot -o name -s creation -H "${child}" | tail -n1)
+                local child_dest="${dest}/${child_relative}"
+                local child_remote_target="${remote_user}@${remote_server}:${child_dest}"
+
+                # LOCAL child
+                if [[ "$destination_remote" == "no" ]]; then
+                    if [[ "$dry_run" == "yes" ]]; then
+                        echo "DRY RUN: zfs send \"${child_snapshot}\" | zfs receive -F \"${child_dest}\""
+                    else
+                        run_restore zfs send "${child_snapshot}" \
+                          | run_restore zfs receive -F "${child_dest}"
+                        unraid_notify "Local child restore succeeded: ${child_source}" "success"
+                    fi
+                fi
+
+                # REMOTE child
+                if [[ "$destination_remote" == "yes" ]]; then
+                    if [[ "$dry_run" == "yes" ]]; then
+                        echo "DRY RUN: zfs send \"${child_snapshot}\" | ssh ${child_remote_target%:*} zfs receive -F \"${child_dest}\""
+                    else
+                        ssh "${remote_user}@${remote_server}" "zfs create -p \"${child_dest%/*}\"" 2>/dev/null || true
+                        run_restore zfs send "${child_snapshot}" \
+                          | run_restore ssh "${remote_user}@${remote_server}" zfs receive -F "${child_dest}"
+                        unraid_notify "Remote child restore succeeded: ${child_source}" "success"
+                    fi
                 fi
             done
         fi
     done
 
-    # Send final summary notification
-    if [ "$final_status" = "success" ]; then
+    if [[ "$final_status" == "success" ]]; then
         unraid_notify "$final_message" "success"
         echo "SUMMARY: $final_message"
     else
