@@ -1,5 +1,7 @@
 #!/bin/bash
 #set -x  # Uncomment for debugging (enables trace mode for debugging each command execution)
+set -euo pipefail
+trap 'unraid_notify "Script terminated unexpectedly." "failure"' ERR
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # #   Script for snapshotting and/or replication of a ZFS dataset locally or remotely using ZFS                                             # #
@@ -11,6 +13,12 @@
 ####################
 # Main Variables
 ####################
+
+####################
+# Dry-Run
+# Enable simulation mode so the script reports intended actions without actually creating snapshots, pruning, or replicating.
+####################
+dry_run="yes"  # Set to "yes" to run in dry‑run mode, or "no" to perform real operations.
 
 ####################
 # Unraid Notifications Configuration
@@ -102,93 +110,36 @@ unraid_notify() {
 ####################
 # Function: global_pre_run_checks
 # Performs essential checks before processing any datasets.
-# Ensures required tools are installed and configurations are valid.
 ####################
 global_pre_run_checks() {
-    # Ensure ZFS utilities are installed and executable
-    if [ ! -x "$(which zfs)" ]; then
+    # Ensure ZFS utilities are installed
+    if ! command -v zfs &>/dev/null; then
         msg="ZFS utilities are not found. Ensure you are using Unraid 6.12 or above."
-        echo "$msg"
-        unraid_notify "$msg" "failure"
-        exit 1
+        echo "$msg"; unraid_notify "$msg" "failure"; exit 1
     fi
 
-    # Ensure Sanoid is installed and executable
-    if [ ! -x /usr/local/sbin/sanoid ]; then
+    # Ensure Sanoid is installed
+    if [ ! -x "/usr/local/sbin/sanoid" ]; then
         msg="Sanoid is not found or not executable. Please install Sanoid and try again."
-        echo "$msg"
-        unraid_notify "$msg" "failure"
-        exit 1
+        echo "$msg"; unraid_notify "$msg" "failure"; exit 1
     fi
 
-    # Validate the replication setting
-    if [ "$replication" != "yes" ] && [ "$replication" != "no" ]; then
-        msg="Invalid replication method: ${replication}. Set to 'yes', or 'no'."
-        echo "$msg"
-        unraid_notify "$msg" "failure"
-        exit 1
-    fi
+    # Validate boolean settings
+    for var in replication auto_snapshots autoprune_snapshots destination_remote; do
+        if [[ "${!var}" != "yes" && "${!var}" != "no" ]]; then
+            msg="Invalid setting for $var: ${!var}. Must be 'yes' or 'no'."
+            echo "$msg"; unraid_notify "$msg" "failure"; exit 1
+        fi
+    done
 
-    # Validate the autosnap setting
-    if [ "$auto_snapshots" != "yes" ] && [ "$auto_snapshots" != "no" ]; then
-        msg="The 'auto_snapshots' variable is not set to a valid value. Please set it to either 'yes' or 'no'."
-        echo "$msg"
-        unraid_notify "$msg" "failure"
-        exit 1
-    fi
-
-    # Validate the autoprune setting
-    if [ "$autoprune_snapshots" != "yes" ] && [ "$autoprune_snapshots" != "no" ]; then
-        msg="The 'autoprune_snapshots' variable is not set to a valid value. Please set it to either 'yes' or 'no'."
-        echo "$msg"
-        unraid_notify "$msg" "failure"
-        exit 1
-    fi
-
-    # Verify the script is set to do some work
+    # Ensure at least one action is enabled
     if [ "$replication" != "yes" ] && [ "$auto_snapshots" = "no" ]; then
-        msg='Both replication and autosnap are disabled. The script has been run with nothing to do.'
-        echo "$msg"
-        unraid_notify "$msg" "failure"
-        exit 1
+        msg='Both replication and autosnap are disabled. Nothing to do.'
+        echo "$msg"; unraid_notify "$msg" "failure"; exit 1
     fi
 
-    # Validate the remote destination configuration
-    if [ "$destination_remote" != "yes" ] && [ "$destination_remote" != "no" ]; then
-        msg="Invalid destination_remote setting. Set to 'yes' or 'no'."
-        echo "$msg"
-        unraid_notify "$msg" "failure"
-        exit 1
-    fi
-
-    # Ensure remote_user and remote_server are set if remote backup is enabled
-    if [ "$destination_remote" = "yes" ] && { [ -z "$remote_user" ] || [ -z "$remote_server" ]; }; then
-        msg="Remote user and server must be set when destination_remote is 'yes'."
-        echo "$msg"
-        unraid_notify "$msg" "failure"
-        exit 1
-    fi
-
-    # Check if the remote server is reachable (if remote backup is enabled)
-    if [ "$destination_remote" = "yes" ]; then
-        echo "Checking remote server availability..."
-        if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "${remote_user}@${remote_server}" echo 'SSH connection successful' &>/dev/null; then
-            msg="SSH connection failed. Verify remote server details and ensure SSH keys are exchanged."
-            echo "$msg"
-            unraid_notify "$msg" "failure"
-            exit 1
-        fi
-
-        # Check if syncoid is installed on the remote server
-        if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "${remote_user}@${remote_server}" "command -v syncoid >/dev/null 2>&1"; then
-            msg="Syncoid is not found on the remote server: ${remote_server}. Please install syncoid to proceed with remote replication."
-            echo "$msg"
-            unraid_notify "$msg" "failure"
-            exit 1
-        fi
-    else
-        echo "Replication target is a local/same server."
-    fi
+    # Delegate remote checks
+    helper_check_remote
 }
 
 #####################
@@ -220,6 +171,72 @@ dataset_pre_run_checks() {
         echo "$msg"
         unraid_notify "$msg" "failure"
         exit 1
+    fi
+}
+
+####################
+# Function: helper_check_remote
+# Validates remote settings, SSH connectivity, and syncoid on the remote host.
+####################
+helper_check_remote() {
+    if [ "$destination_remote" = "yes" ]; then
+        # Ensure remote_user and remote_server are set
+        if [ -z "$remote_user" ] || [ -z "$remote_server" ]; then
+            msg="Remote user and server must be set when destination_remote is 'yes'."
+            echo "$msg"; unraid_notify "$msg" "failure"; exit 1
+        fi
+
+        # Test SSH connection
+        echo "Checking remote server availability..."
+        if ! ssh -o BatchMode=yes -o ConnectTimeout=5 \
+              "${remote_user}@${remote_server}" \
+              "echo 'SSH connection successful'" &>/dev/null; then
+            msg="SSH connection failed. Verify remote details and SSH keys."
+            echo "$msg"; unraid_notify "$msg" "failure"; exit 1
+        fi
+
+        # Verify syncoid installation
+        echo "Verifying syncoid on remote..."
+        if ! ssh -o BatchMode=yes -o ConnectTimeout=5 \
+              "${remote_user}@${remote_server}" \
+              "command -v syncoid >/dev/null 2>&1"; then
+            msg="Syncoid not found on ${remote_server}. Install it first."
+            echo "$msg"; unraid_notify "$msg" "failure"; exit 1
+        fi
+    else
+        echo "Replication target is local."
+    fi
+}
+
+
+####################
+# Function: helper_ensure_dataset_path
+# Ensures the ZFS dataset hierarchy exists locally or remotely.
+####################
+helper_ensure_dataset_path() {
+    local path="$1"
+
+    # Dry‑run: simulate creating dataset path
+    if [ "$dry_run" = "yes" ]; then
+        echo "[DRY-RUN] Would ensure dataset path exists: ${path}"
+        return 0
+    fi
+
+    if [ "$destination_remote" = "yes" ]; then
+        # Create remote dataset path if missing
+        if ! ssh "${remote_user}@${remote_server}" \
+             "if ! zfs list -H \"${path}\" &>/dev/null; then zfs create -p \"${path}\"; fi"; then
+            unraid_notify "Failed to create remote dataset ${path}" "failure"
+            return 1
+        fi
+    else
+        # Create local dataset path if missing
+        if ! zfs list -H "${path}" &>/dev/null; then
+            if ! zfs create -p "${path}"; then
+                unraid_notify "Failed to create local dataset ${path}" "failure"
+                return 1
+            fi
+        fi
     fi
 }
 
@@ -272,35 +289,38 @@ autoprune = ${autoprune_snapshots}"
 # Creates automatic snapshots of the source dataset using Sanoid based on the retention policy.
 ####################
 autosnap() {
-    echo "Creating automatic snapshots for ${source_dataset} and its children using Sanoid."
+    # Dry‑run: just simulate
+    if [ "$dry_run" = "yes" ]; then
+        echo "[DRY-RUN] Would create snapshots for ${source_dataset}"
+        return 0
+    fi
 
-    # Run Sanoid in verbose mode and capture all output
+    echo "Creating automatic snapshots for ${source_dataset} and its children using Sanoid."
     if /usr/local/sbin/sanoid --configdir="${sanoid_config_complete_path}" --take-snapshots; then
-            unraid_notify "Snapshot creation successful for ${source_dataset}." "success"
+        unraid_notify "Snapshot creation successful for ${source_dataset}." "success"
     else
         msg="Snapshot creation failed for ${source_dataset}."
-        echo "$msg"
-        unraid_notify "$msg" "failure"
-        exit 1
+        echo "$msg"; unraid_notify "$msg" "failure"; exit 1
     fi
 }
-
 
 ####################
 # Function: autoprune
 # Prunes old snapshots of the source dataset using Sanoid based on the retention policy.
 ####################
 autoprune() {
-    echo "Pruning snapshots for ${source_dataset} and its children using Sanoid."
+    # Dry‑run: just simulate
+    if [ "$dry_run" = "yes" ]; then
+        echo "[DRY-RUN] Would prune snapshots for ${source_dataset}"
+        return 0
+    fi
 
-    # Run Sanoid in verbose mode and capture all output
+    echo "Pruning snapshots for ${source_dataset} and its children using Sanoid."
     if /usr/local/sbin/sanoid --configdir="${sanoid_config_complete_path}" --prune-snapshots; then
         unraid_notify "Snapshot removal successful for ${source_dataset} and its children." "success"
     else
         msg="Snapshot removal failed for ${source_dataset} and its children."
-        echo "$msg"
-        unraid_notify "$msg" "failure"
-        exit 1
+        echo "$msg"; unraid_notify "$msg" "failure"; exit 1
     fi
 }
 
@@ -309,59 +329,57 @@ autoprune() {
 # Uses ZFS to replicate the source dataset to the destination.
 ####################
 zfs_replication() {
-        zfs_destination_path="${destination_dataset}/${source_dataset//\//_}"
+    local zfs_destination_path="${destination_dataset}/${source_dataset//\//_}"
+    local destination
 
-        # Determine if replication is to a remote or local destination
-        if [ "$destination_remote" = "yes" ]; then
-            destination="${remote_user}@${remote_server}:${zfs_destination_path}"
-            # Check or create the full destination ZFS dataset hierarchy on the remote server
-            if ! ssh "${remote_user}@${remote_server}" "if ! zfs list -o name -H '\${zfs_destination_path}' &>/dev/null; then zfs create -p '\${zfs_destination_path}'; fi"; then
-                unraid_notify "Failed to check or create ZFS dataset hierarchy on remote server: ${destination}" "failure"
-                return 1
-            fi
-        else
-            destination="${zfs_destination_path}"
-            # Check or create the full destination ZFS dataset hierarchy locally
-            if ! zfs list -o name -H "${zfs_destination_path}" &>/dev/null; then
-                if ! zfs create -p "${zfs_destination_path}"; then
-                    unraid_notify "Failed to check or create local ZFS dataset hierarchy: ${zfs_destination_path}" "failure"
-                    return 1
-                fi
-            fi
-        fi
+    # Determine the destination string
+    if [ "$destination_remote" = "yes" ]; then
+        destination="${remote_user}@${remote_server}:${zfs_destination_path}"
+    else
+        destination="${zfs_destination_path}"
+    fi
 
-        # Validate that the latest snapshot exists
-        latest_snapshot=$(zfs list -t snapshot -o name -s creation -H -r "${source_dataset}" | tail -n 1)
-        if [ -z "$latest_snapshot" ]; then
-            unraid_notify "No snapshot found for ${source_dataset}. Skipping ZFS replication." "failure"
-            return 1
-        fi
+    # Build syncoid flags for both real run and dry‑run
+    local syncoid_flags=(-r --no-sync-snap)
+    case "${syncoid_mode}" in
+        strict-mirror)
+            syncoid_flags+=(--delete-target-snapshots --force-delete)
+            ;;
+        basic)
+            ;;
+        *)
+            msg="Invalid syncoid_mode: ${syncoid_mode}"
+            echo "$msg"; exit 1
+            ;;
+    esac
 
-        # Prepare syncoid flags with the --no-sync-snap option to avoid creating extra snapshots
-        syncoid_flags=("-r" "--no-sync-snap")
-        case "${syncoid_mode}" in
-            "strict-mirror")
-                syncoid_flags+=("--delete-target-snapshots" "--force-delete")
-                ;;
-            "basic")
-                # No additional flags other than -r and --no-sync-snap
-                ;;
-            *)
-                echo "Invalid syncoid_mode. Please set it to 'strict-mirror' or 'basic'."
-                exit 1
-                ;;
-        esac
+    # Dry‑run: show what would happen and exit
+    if [ "$dry_run" = "yes" ]; then
+        echo "[DRY-RUN] Would ensure dataset path: ${zfs_destination_path}"
+        echo "[DRY-RUN] Would run: syncoid ${syncoid_flags[*]} \"${source_dataset}\" \"${destination}\""
+        return 0
+    fi
 
-        # Perform ZFS replication using syncoid
-        echo "Starting ZFS replication using syncoid with mode: ${syncoid_mode}"
-        echo "Running Command: /usr/local/sbin/syncoid ${syncoid_flags[*]} ${source_dataset} ${destination}"
+    # Ensure the dataset hierarchy exists (local or remote)
+    helper_ensure_dataset_path "${zfs_destination_path}" || return 1
 
-        if /usr/local/sbin/syncoid "${syncoid_flags[@]}" "${source_dataset}" "${destination}"; then
-            unraid_notify "ZFS replication was successful from source: ${source_dataset} to destination: ${destination}" "success"
-        else
-            unraid_notify "ZFS replication failed from source: ${source_dataset} to ${destination}" "failure"
-            return 1
-        fi
+    # Find latest snapshot
+    local latest_snapshot
+    latest_snapshot=$(zfs list -t snapshot -o name -s creation -H -r \
+                      "${source_dataset}" | tail -n1)
+    if [ -z "${latest_snapshot}" ]; then
+        msg="No snapshot found for ${source_dataset}. Skipping replication."
+        echo "$msg"; unraid_notify "$msg" "failure"; return 1
+    fi
+
+    # Perform actual replication
+    echo "Running: syncoid ${syncoid_flags[*]} \"${source_dataset}\" \"${destination}\""
+    if /usr/local/sbin/syncoid "${syncoid_flags[@]}" "${source_dataset}" "${destination}"; then
+        unraid_notify "Replication succeeded: ${source_dataset} → ${destination}" "success"
+    else
+        unraid_notify "Replication FAILED: ${source_dataset} → ${destination}" "failure"
+        return 1
+    fi
 }
 
 ####################
@@ -373,53 +391,39 @@ cleanup_unwanted_sanoid_configs() {
     local found_unwanted=false
     local dataset_trimmed
 
-    echo "Starting cleanup of unwanted Sanoid configs."
+    echo "Cleaning up stale Sanoid configs…"
 
-    if [ -f "$sanoid_state_file" ]; then
-        echo "Loading previous state from ${sanoid_state_file}."
-
-        # Extract the datasets from the previous run
-        mapfile -t previous_datasets < <(grep "^datasets:" "$sanoid_state_file" | sed 's/datasets: //' | tr ' ' '\n')
-
-        if [ ${#previous_datasets[@]} -eq 0 ]; then
-            echo "No previous datasets found in the state file."
-        else
-            echo "Previous datasets: ${previous_datasets[*]}"
-        fi
+    if [ -f "${sanoid_state_file}" ]; then
+        mapfile -t previous_datasets < <(
+            grep "^datasets:" "${sanoid_state_file}" \
+            | sed 's/datasets: //' \
+            | tr ' ' '\n'
+        )
     else
-        echo "No previous state file found, creating a new state file after cleanup."
         previous_datasets=()
     fi
 
-    echo "Checking for unwanted Sanoid configs."
     for dataset in "${previous_datasets[@]}"; do
-        # Trim spaces around the dataset name
-        dataset_trimmed=$(echo "$dataset" | xargs)
-
-        if [[ ! " ${source_datasets[*]} " =~ ${dataset_trimmed} ]]; then
-            echo "Dataset $dataset_trimmed is no longer in the source list, removing its Sanoid config..."
-            sanoid_config_complete_path="${sanoid_config_dir}${dataset_trimmed//\//_}/"
-
-            if [ -d "$sanoid_config_complete_path" ]; then
-                echo "Deleting Sanoid config directory: $sanoid_config_complete_path"
-                if rm -rf "$sanoid_config_complete_path"; then
-                    echo "Successfully deleted: $sanoid_config_complete_path"
-                    found_unwanted=true
-                else
-                    echo "Failed to delete: $sanoid_config_complete_path"
-                fi
+        dataset_trimmed="$(echo "${dataset}" | xargs)"
+        # quote the trimmed name in the regex test
+        if [[ ! " ${source_datasets[*]} " =~ " ${dataset_trimmed} " ]]; then
+            echo "Removing config for ${dataset_trimmed}"
+            local config_dir="${sanoid_config_dir}${dataset_trimmed//\//_}/"
+            if [ -d "${config_dir}" ]; then
+                rm -rf "${config_dir}" \
+                  && echo "Deleted ${config_dir}" \
+                  || echo "Failed to delete ${config_dir}"
+                found_unwanted=true
             fi
         fi
     done
 
-    if ! $found_unwanted; then
-        echo "No unwanted Sanoid configs found."
+    if [ "${found_unwanted}" = false ]; then
+        echo "No stale configs found."
     fi
 
-    echo "Saving current state to ${sanoid_state_file}."
-    echo "datasets: ${source_datasets[*]}" > "$sanoid_state_file"
-
-    echo "Cleanup of unwanted Sanoid configs completed."
+    echo "Saving new state."
+    echo "datasets: ${source_datasets[*]}" > "${sanoid_state_file}"
 }
 
 ####################
@@ -432,6 +436,12 @@ run_for_each_dataset() {
     # Perform global pre-run checks
     echo "Performing global pre-run checks"
     global_pre_run_checks
+
+    # Validate that at least one source dataset is configured
+    if [ "${#source_datasets[@]}" -eq 0 ]; then
+        msg="No source datasets configured. Please set source_datasets in the script."
+        echo "$msg"; unraid_notify "$msg" "failure"; exit 1
+    fi
 
     # Iterate over each defined dataset
     for dataset in "${source_datasets[@]}"; do

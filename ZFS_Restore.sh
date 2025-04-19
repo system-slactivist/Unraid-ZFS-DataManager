@@ -1,5 +1,7 @@
 #!/bin/bash
 #set -x  # Uncomment for debugging (enables trace mode for debugging each command execution)
+set -euo pipefail
+trap 'unraid_notify "Script terminated unexpectedly." "failure"' ERR
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # #   Script for restoring replication of a ZFS dataset locally or remotely using ZFS                                                       # #
