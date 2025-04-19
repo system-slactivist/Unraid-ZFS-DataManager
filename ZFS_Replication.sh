@@ -40,7 +40,9 @@ source_datasets=("cache/appdata" "cache/downloads" "grid/vms") # Add all the poo
 auto_snapshots="yes" # Set to "yes" to automatically take snapshots when the script is ran or "no" to skip.
 autoprune_snapshots="yes" # Set to "yes" to automatically remove snapshots beyond the retention policy set to "no" to disable retention and keep snapshots forever.
 
-# Retention policy:
+####################
+# Retention policy
+####################
 snapshot_hours="0"  # Number of hourly snapshots to keep (0 = none)
 snapshot_days="7"   # Number of daily snapshots to keep (0 = none)
 snapshot_weeks="4"  # Number of weekly snapshots to keep (0 = none)
