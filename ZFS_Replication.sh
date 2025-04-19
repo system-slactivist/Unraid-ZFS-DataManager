@@ -50,6 +50,12 @@ snapshot_months="3" # Number of monthly snapshots to keep (0 = none)
 snapshot_years="0"  # Number of yearly snapshots to keep (0 = none)
 
 ####################
+# Replication Settings
+# Requires having a second ZFS pool that is either local or remote
+####################
+replication="no"  # Choose between "yes" for ZFS replication or "no" for just using snapshots.
+
+####################
 # Remote Server Configuration
 # Configure settings if you plan to replicate data to a remote server.
 ####################
@@ -58,20 +64,17 @@ remote_user="root"       # Remote server user (Unraid server typically uses "roo
 remote_server="10.10.20.197" # Remote server's name or IP address
 
 ####################
-# Replication Settings
-# Requires having a second ZFS pool that is either local or remote
-####################
-replication="no"  # Choose between "yes" for ZFS replication or "no" for just using snapshots.
-
-####################
 # Replication Variables
+# Remote or local variable will be ignored depending destination_remote value.
 ####################
 destination_local_dataset="vault/replication" # Local parent dataset under which the replicated data will reside (e.g. "pool/dataset")
 destination_remote_dataset="vault/replication_remote" # Remote parent dataset under which the replicated data will reside (e.g. "pool/dataset")
 
+####################
 # Syncoid replication mode:
 # "strict-mirror" - Mirrors the source dataset strictly, deleting snapshots in the destination that are not in the source.
 # "basic" - Basic replication without extra flags; does not delete snapshots in the destination that are missing from the source.
+####################
 syncoid_mode="strict-mirror"
 
 ####################
@@ -79,6 +82,10 @@ syncoid_mode="strict-mirror"
 # These settings are typically set correctly by default and do not need to be changed.
 ####################
 sanoid_config_dir="/mnt/user/system/sanoid/"  # Location of the Sanoid configuration directory
+
+####################
+# Main Script
+####################
 
 ####################
 # Function: unraid_notify
